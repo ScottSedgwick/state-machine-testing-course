@@ -1,14 +1,14 @@
 {-# OPTIONS_GHC -Wno-unused-binds -Wno-unused-imports #-}
 {-# LANGUAGE RankNTypes #-}
-module PropertyTests (propertyTests) where
+module PropertyTests (propertyTests, genTree, genMyBTreeVal) where
 
-import           Control.Applicative (liftA2)
 import           Control.Lens        (Prism', matching, preview, review)
 import           Control.Lens.TH     (makePrisms)
 
 import           Data.Function       (on)
-import           Data.List           (filter, insertBy, nubBy)
+import           Data.List           (delete, filter, insert, nub, sort)
 import           Data.Monoid         (Endo (..))
+import           Data.Maybe          (isJust, isNothing)
 
 import           Test.Tasty          (TestTree, testGroup)
 import           Test.Tasty.Hedgehog (testProperty)
@@ -18,9 +18,10 @@ import qualified Hedgehog.Gen        as Gen
 import qualified Hedgehog.Range      as Range
 
 import           MyBTree
+import           Generators
 
 -- [OPTIONAL]
-import           LawPropertiesBonus  (myBTreePrismLaws)
+import           LawPropertiesBonus  (myBTreePrismLaws, firstPrismLaw, secondPrismLaw, thirdPrismLaw, _Empty, _Node)
 
 ----------------------------------------------------------------------------------------------------
 addTen :: Int -> Int
@@ -30,7 +31,9 @@ addTen = appEndo . foldMap Endo $ replicate 10 succ
 --
 -- \/ (x : Int) -> addTen x === (x + 10)
 prop_addTen :: Property
-prop_addTen = error "prop_addTen not implemented"
+prop_addTen = property $ do
+  x <- forAll $ Gen.int (Range.linear 0 1000)
+  addTen x === (x + 10)
 
 ----------------------------------------------------------------------------------------------------
 
@@ -40,13 +43,19 @@ prop_addTen = error "prop_addTen not implemented"
 -- test, and commensurately the function itself, more robust.
 --
 badReverse :: [a] -> [a]
-badReverse []     = []
-badReverse (_:xs) = reverse xs
+badReverse = reverse 
 
 prop_badReverse :: Property
 prop_badReverse = property $ do
   xs <- forAll (Gen.list (Range.linear 0 1000) Gen.bool)
+  ys <- forAll (Gen.list (Range.linear 0 1000) Gen.bool)
   badReverse (badReverse xs) === xs
+  badReverse xs === badReverse xs
+  if length xs > 1 && head xs /= last xs
+    then badReverse xs /== xs
+    else assert True
+  badReverse (xs ++ ys) === badReverse ys ++ badReverse xs
+
   -- [BONUS]: Are there other properties for reversing a list that could make this test more robust?
 
 ----------------------------------------------------------------------------------------------------
@@ -60,6 +69,14 @@ prop_badReverse = property $ do
 -- We will start with the following data structure.
 newtype Coin = Coin Int deriving (Eq, Show)
 
+instance Enum Coin where
+  toEnum = Coin
+  fromEnum (Coin x) = x
+
+instance Bounded Coin where
+  minBound = Coin 0
+  maxBound = Coin maxCoinValue
+
 -- That has a pre-determined maximum value.
 maxCoinValue :: Int
 maxCoinValue = 1000000
@@ -71,46 +88,53 @@ validCoin (Coin c) = c >= 0 && c < maxCoinValue
 -- This is the function we're going to write some tests for.
 addCoins :: Coin -> Coin -> Maybe Coin
 addCoins (Coin a) (Coin b) =
-  if a + b < maxCoinValue
+  if (a + b < maxCoinValue) && (a < maxCoinValue) && (b < maxCoinValue)
     then Just (Coin $ a + b)
     else Nothing
 
 -- Write our generator for Coin
 genCoin :: MonadGen m => m Coin
-genCoin = error "genCoin not implemented"
+genCoin = Gen.enumBounded
+
+genCoinB :: MonadGen m => Int -> Int -> m Coin
+genCoinB lower upper = Coin <$> Gen.int (Range.linear lower upper)
 
 -- Test our 'normal' case, aka the happy path
 prop_addCoins_Normal :: Property
-prop_addCoins_Normal = error "prop_addCoins_Normal not implemented"
+prop_addCoins_Normal = property $ do
+  x <- forAll $ genCoinB 0 (maxCoinValue `div` 2)
+  y <- forAll $ genCoinB 0 (maxCoinValue `div` 2)
+  let res = addCoins x y
+  case res of
+    Nothing -> failure
+    Just z  -> fromEnum z === fromEnum x + fromEnum y
 
 -- Test the 'overflow' case, aka the sad path
 prop_addCoins_Overflow :: Property
-prop_addCoins_Overflow = error "prop_addCoins_Overflow not implemented"
+prop_addCoins_Overflow = property $ do
+  x <- forAll $ genCoinB 1 maxCoinValue
+  let y = Coin maxCoinValue
+  let res1 = addCoins x y
+  assert (isNothing res1)
+  let res2 = addCoins y x
+  assert (isNothing res2)
 
 -- Instead of having separate properties, we can combine them into a single
 -- property test.
 prop_addCoins_Combined :: Property
-prop_addCoins_Combined = error "prop_addCoins not implemented"
+prop_addCoins_Combined = property $ do
+  x <- forAll genCoin
+  y <- forAll genCoin
+  let res = addCoins x y
+  if (fromEnum x) + (fromEnum y) > maxCoinValue
+  then assert (isNothing res)
+  else 
+    case res of
+      Nothing -> failure
+      Just z -> fromEnum z === fromEnum x + fromEnum y
 
 ----------------------------------------------------------------------------------------------------
 
--- Use the binary search tree that is defined in the MyBTree module, to
--- complete the following functions.
---
--- These examples are lifted from a presentation by John Hughes: "Building on developer intuitions". 
--- Which may be viewed at: https://www.youtube.com/watch?v=NcJOiQlzlXQ
-
--- To test our assumptions, we'll need to generate random MyBTrees. Using the
--- constructor functions from the MyBTree module, write a generator that can use
--- a given generator to populate the tree.
-genTree :: (Ord k, MonadGen m) => m (k,v) -> m (MyBTree k v)
-genTree genKV = fromList <$> Gen.list (Range.linear 0 100) genKV
-
--- To populate our tree, we need to generate some keys and their respective
--- values. We will make Hedgehog do this for us by reusing some of the built-in
--- generators.
-genMyBTreeVal :: MonadGen m => m (Int, Char)
-genMyBTreeVal = liftA2 (,) (Gen.int (Range.linear (-100) 100)) (Gen.enum 'a' 'z')
 
 -- We're not ready to write a property test for inserting values into our binary
 -- search tree.
@@ -130,11 +154,35 @@ genMyBTreeVal = liftA2 (,) (Gen.int (Range.linear (-100) 100)) (Gen.enum 'a' 'z'
 --          [(1, 'a'), (3,'c')] -> modelInsert (2,'b') -> [(1, 'a'), (2,'b'), (3,'c')]
 --
 prop_MyBTree_Insert :: Property
-prop_MyBTree_Insert = error "prop_MyBTree_Insert not implemented"
+prop_MyBTree_Insert = property $ do
+  xs <- forAll $ Gen.list (Range.linear 0 100) genMyBTreeVal
+  value <- forAll $ genMyBTreeVal
+  test_List_Insert (sort xs) value
+
+test_List_Insert :: (MonadTest m, Ord a) => [a] -> a -> m ()
+test_List_Insert xs value = do
+  assert (isSorted xs)
+  let zs = Data.List.insert value xs
+  assert (isSorted zs)
+
+isSorted :: Ord a => [a] -> Bool
+isSorted [] = True
+isSorted [_] = True
+isSorted (x:y:xs) = x <= y && isSorted (y:xs)
 
 -- Now implement a test to ensure that we're correctly deleting elements within the tree.
 prop_MyBTree_Delete :: Property
-prop_MyBTree_Delete = error "prop_MyBTree_Delete not implemented"
+prop_MyBTree_Delete = property $ do
+  xs <- nub <$> (forAll $ Gen.list (Range.linear 1 100) genMyBTreeVal)
+  idx <- forAll $ Gen.int (Range.linear 0 (length xs - 1))
+  let value = xs !! idx
+  let ys = delete value xs
+  test_List_Delete xs ys value
+
+test_List_Delete :: (MonadTest m, Ord a) => [a] -> [a] -> a -> m ()
+test_List_Delete orig upd val = do
+  assert (val `elem` orig)
+  assert (not (val `elem` upd))
 
 ----------------------------------------------------------------------------------------------------
   --
@@ -148,13 +196,4 @@ propertyTests = testGroup "Level00 - Property Tests"
 
   , testProperty "BST insert" prop_MyBTree_Insert
   , testProperty "BST delete" prop_MyBTree_Delete
-
-  -- OPTIONAL, exercises for this property are in 'LawPropertiesBonus.hs'
-  --
-  -- These implementing prisms and writing property tests to validate that the
-  -- given prism is law abiding. It is an optional exercise for your own
-  -- enjoyment and to demonstrate that property based testing can provide
-  -- _immense_ power for validating necessary assumptions.
-  --
-  -- , testProperty "Prism Laws Hold for MyBTree" myBTreePrismLaws
   ]

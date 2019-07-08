@@ -16,7 +16,7 @@ module MyBTree
 data MyBTree k a
   = Empty
   | Node (MyBTree k a) (k,a) (MyBTree k a)
-  deriving (Show, Functor, Traversable, Foldable)
+  deriving (Show, Functor, Traversable, Foldable, Eq)
 
 fromList :: (Foldable f, Ord k) => f (k,a) -> MyBTree k a
 fromList = foldr (uncurry insert) Empty
